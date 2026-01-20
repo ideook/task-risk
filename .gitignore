@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+!frontend/.env.local.example
 
 # Python
 __pycache__/
@@ -30,3 +31,6 @@ Data/db_*_*_mysql/
 
 # Node cache
 .npm-cache/
+node_modules/
+frontend/.next/
+frontend/out/

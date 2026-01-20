@@ -278,6 +278,23 @@ Commands
 `sudo chown ubuntu:ubuntu /opt/task-risk`
 `# (원하는 방식으로 코드 업로드/클론 후 /opt/task-risk 에 위치)`
 
+---
+
+## Frontend MVP (Next.js, local)
+
+1) API 서버 실행
+`uvicorn api.main:app --reload --port 8001`
+
+2) 프론트 환경변수 생성
+`cp frontend/.env.local.example frontend/.env.local`
+
+3) 프론트 설치/실행
+`cd frontend`
+`npm install`
+`npm run dev`
+
+접속: `http://localhost:3000`
+
 5) 가상환경 생성 및 의존성 설치
 `python3 -m venv /opt/task-risk/.venv`
 `/opt/task-risk/.venv/bin/pip install -r /opt/task-risk/requirements.txt`
