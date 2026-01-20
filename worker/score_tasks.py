@@ -5,7 +5,14 @@ import os
 from pathlib import Path
 
 from api.db import get_conn
-from worker.llm_providers import ProviderError, env_flag, get_provider
+from worker.llm_providers import (
+    ProviderError,
+    env_flag,
+    get_enabled_providers,
+    get_provider,
+    is_provider_enabled,
+    parse_model_spec,
+)
 from worker.retry import retry_call
 
 PROMPT_TEMPLATE = (
@@ -24,8 +31,8 @@ def main():
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument(
         "--models",
-        default="openai,anthropic,gemini,grok",
-        help="Comma-separated model names",
+        default="openai,claude",
+        help="Comma-separated model specs (provider or provider:model)",
     )
     parser.add_argument("--prompt-version", default=os.getenv("LLM_PROMPT_VERSION", "v1"))
     parser.add_argument("--model-version", default=os.getenv("MODEL_VERSION", "mock-1"))
@@ -48,6 +55,14 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     data_version = args.data_version
     use_mock = env_flag("USE_MOCK_LLM", "1")
+    enabled_providers = get_enabled_providers()
+
+    model_specs = []
+    for raw in models:
+        try:
+            model_specs.append(parse_model_spec(raw))
+        except ProviderError as exc:
+            print(f"[llm] skip invalid spec '{raw}': {exc}")
 
     with get_conn() as conn:
         with conn.cursor() as cur:
@@ -66,8 +81,47 @@ def main():
             )
             tasks = cur.fetchall()
 
-        for model in models:
-            provider = get_provider(model, use_mock)
+        for spec in model_specs:
+            model_label = spec.label
+            if not is_provider_enabled(spec.provider, enabled_providers):
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO model_run (data_version, model, prompt_version, model_version, status, error_message)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        """,
+                        (
+                            data_version,
+                            model_label,
+                            args.prompt_version,
+                            args.model_version,
+                            "skipped",
+                            f"Provider disabled: {spec.provider}",
+                        ),
+                    )
+                conn.commit()
+                continue
+
+            try:
+                provider = get_provider(spec, use_mock)
+            except ProviderError as exc:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO model_run (data_version, model, prompt_version, model_version, status, error_message, error_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, NOW())
+                        """,
+                        (
+                            data_version,
+                            model_label,
+                            args.prompt_version,
+                            args.model_version,
+                            "failed",
+                            str(exc),
+                        ),
+                    )
+                conn.commit()
+                continue
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -75,7 +129,7 @@ def main():
                     VALUES (%s, %s, %s, %s, %s)
                     RETURNING id
                     """,
-                    (data_version, model, args.prompt_version, args.model_version, "running"),
+                    (data_version, model_label, args.prompt_version, args.model_version, "running"),
                 )
                 run_id = cur.fetchone()[0]
                 conn.commit()
@@ -95,7 +149,7 @@ def main():
                               AND task_id = %s AND model = %s
                               AND prompt_hash = %s AND input_hash = %s
                             """,
-                            (data_version, task_id, model, prompt_hash, input_hash),
+                            (data_version, task_id, model_label, prompt_hash, input_hash),
                         )
                         if cur.fetchone():
                             continue
@@ -116,7 +170,9 @@ def main():
                         jitter=args.retry_jitter,
                     )
                     payload = {
-                        "model": model,
+                        "provider": spec.provider,
+                        "model": spec.model,
+                        "model_label": model_label,
                         "prompt_version": args.prompt_version,
                         "model_version": args.model_version,
                         "data_version": data_version,
@@ -124,7 +180,8 @@ def main():
                         "task_statement": task_statement,
                         "score": score,
                     }
-                    raw_path = output_dir / f"run_{run_id}_task_{task_id}_{model}.json"
+                    safe_model = model_label.replace(":", "_").replace("/", "_")
+                    raw_path = output_dir / f"run_{run_id}_task_{task_id}_{safe_model}.json"
                     raw_path.write_text(json.dumps(payload, ensure_ascii=True))
 
                     with conn.cursor() as cur:
@@ -138,7 +195,7 @@ def main():
                             (
                                 data_version,
                                 task_id,
-                                model,
+                                model_label,
                                 score,
                                 run_id,
                                 str(raw_path),

@@ -195,8 +195,26 @@ Files
 - `worker/aggregate_occupations.py`
 - `api/main.py`
 
+LLM 설정 (실서비스 모드)
+- `.env`에서 `USE_MOCK_LLM=0` 설정
+- `LLM_PROVIDERS_ENABLED=openai,anthropic` (필요 시 `local` 추가)
+- 기본 모델
+  - `LLM_OPENAI_MODEL=gpt-5-nano`
+  - `LLM_ANTHROPIC_MODEL=claude-haiku-4-5`
+- 키
+  - `OPENAI_API_KEY=...`
+  - `ANTHROPIC_API_KEY=...`
+- OpenAI 프록시/게이트웨이 사용 시
+  - `LLM_OPENAI_BASE_URL=...`
+- 로컬/OpenAI 호환 서버 사용 시
+  - `LLM_PROVIDERS_ENABLED=local`
+  - `LLM_LOCAL_BASE_URL=http://localhost:11434/v1`
+  - `LLM_LOCAL_MODEL=...`
+  - `LLM_LOCAL_API_KEY=local` (필요 시)
+
 Commands
-- `python -m worker.score_tasks --limit 20 --data-version 30.1`
+- `python -m worker.score_tasks --models openai,claude --limit 20 --data-version 30.1`
+- `python -m worker.score_tasks --models openai:gpt-5-nano,claude:claude-haiku-4-5 --limit 20 --data-version 30.1`
 - `python -m worker.aggregate_occupations --data-version 30.1`
 - `uvicorn api.main:app --reload`
 
