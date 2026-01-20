@@ -73,12 +73,21 @@ class OpenAIProvider(ScoreProvider):
         model_version: str,
     ) -> float:
         prompt = _format_prompt(prompt_template, task_statement)
-        response = self.client.responses.create(
-            model=self.model,
-            input=prompt,
-            max_output_tokens=_int_env("LLM_MAX_OUTPUT_TOKENS", 16),
-            temperature=_float_env("LLM_TEMPERATURE", 0.0),
-        )
+        payload = {
+            "model": self.model,
+            "input": prompt,
+            "max_output_tokens": _int_env("LLM_MAX_OUTPUT_TOKENS", 16),
+        }
+        temperature = _float_env_optional("LLM_TEMPERATURE")
+        if temperature is not None:
+            payload["temperature"] = temperature
+        reasoning_effort = _openai_reasoning_effort(self.model)
+        if reasoning_effort:
+            payload["reasoning"] = {"effort": reasoning_effort}
+        verbosity = _openai_text_verbosity(self.model)
+        if verbosity:
+            payload["text"] = {"verbosity": verbosity}
+        response = self.client.responses.create(**payload)
         text = _extract_openai_text(response)
         return _parse_score(text)
 
@@ -145,12 +154,21 @@ class LocalOpenAIProvider(ScoreProvider):
         model_version: str,
     ) -> float:
         prompt = _format_prompt(prompt_template, task_statement)
-        response = self.client.responses.create(
-            model=self.model,
-            input=prompt,
-            max_output_tokens=_int_env("LLM_MAX_OUTPUT_TOKENS", 16),
-            temperature=_float_env("LLM_TEMPERATURE", 0.0),
-        )
+        payload = {
+            "model": self.model,
+            "input": prompt,
+            "max_output_tokens": _int_env("LLM_MAX_OUTPUT_TOKENS", 16),
+        }
+        temperature = _float_env_optional("LLM_TEMPERATURE")
+        if temperature is not None:
+            payload["temperature"] = temperature
+        reasoning_effort = _openai_reasoning_effort(self.model)
+        if reasoning_effort:
+            payload["reasoning"] = {"effort": reasoning_effort}
+        verbosity = _openai_text_verbosity(self.model)
+        if verbosity:
+            payload["text"] = {"verbosity": verbosity}
+        response = self.client.responses.create(**payload)
         text = _extract_openai_text(response)
         return _parse_score(text)
 
@@ -274,6 +292,34 @@ def _float_env(name: str, default: float) -> float:
         return float(value)
     except ValueError:
         return default
+
+
+def _float_env_optional(name: str) -> Optional[float]:
+    value = os.getenv(name, "").strip()
+    if not value:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def _openai_reasoning_effort(model: str) -> Optional[str]:
+    value = os.getenv("LLM_OPENAI_REASONING_EFFORT") or os.getenv("LLM_REASONING_EFFORT")
+    if value:
+        return value.strip()
+    if model.startswith("gpt-5"):
+        return "minimal"
+    return None
+
+
+def _openai_text_verbosity(model: str) -> Optional[str]:
+    value = os.getenv("LLM_OPENAI_TEXT_VERBOSITY") or os.getenv("LLM_TEXT_VERBOSITY")
+    if value:
+        return value.strip()
+    if model.startswith("gpt-5"):
+        return "low"
+    return None
 
 
 def _get_attr(obj, name: str):

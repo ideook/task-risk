@@ -211,6 +211,7 @@ LLM 설정 (실서비스 모드)
   - `LLM_LOCAL_BASE_URL=http://localhost:11434/v1`
   - `LLM_LOCAL_MODEL=...`
   - `LLM_LOCAL_API_KEY=local` (필요 시)
+- GPT-5 계열은 `temperature`를 지원하지 않으므로 기본값은 비워둠 (`LLM_TEMPERATURE=`)
 
 Commands
 - `python -m worker.score_tasks --models openai,claude --limit 20 --data-version 30.1`

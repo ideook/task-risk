@@ -4,6 +4,10 @@ import os
 from api.db import get_conn
 
 
+def env_flag(name: str, default: str = "0") -> bool:
+    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "y"}
+
+
 def main():
     parser = argparse.ArgumentParser(description="Aggregate occupation AI scores")
     parser.add_argument(
@@ -13,10 +17,13 @@ def main():
         or "30.1",
         help="O*NET data version label",
     )
+    parser.add_argument("--verbose", action="store_true", default=env_flag("AGG_VERBOSE", "0"))
     args = parser.parse_args()
 
     with get_conn() as conn:
         with conn.cursor() as cur:
+            if args.verbose:
+                print("[agg] start", f"data_version={args.data_version}", flush=True)
             cur.execute(
                 """
                 INSERT INTO occupation_ai_score (data_version, soc_code, mean, std, updated_at)
@@ -39,6 +46,8 @@ def main():
                 """,
                 (args.data_version,),
             )
+            if args.verbose:
+                print("[agg] done", f"rows={cur.rowcount}", flush=True)
         conn.commit()
 
 

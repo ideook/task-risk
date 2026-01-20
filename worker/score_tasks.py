@@ -48,6 +48,7 @@ def main():
     parser.add_argument("--retry-base-delay", type=float, default=float(os.getenv("LLM_RETRY_BASE_DELAY", "0.5")))
     parser.add_argument("--retry-max-delay", type=float, default=float(os.getenv("LLM_RETRY_MAX_DELAY", "10.0")))
     parser.add_argument("--retry-jitter", type=float, default=float(os.getenv("LLM_RETRY_JITTER", "0.2")))
+    parser.add_argument("--verbose", action="store_true", default=env_flag("LLM_VERBOSE", "0"))
     args = parser.parse_args()
 
     models = [m.strip() for m in args.models.split(",") if m.strip()]
@@ -81,6 +82,17 @@ def main():
             )
             tasks = cur.fetchall()
 
+        if args.verbose:
+            model_labels = [spec.label for spec in model_specs]
+            print(
+                "[llm] start",
+                f"data_version={data_version}",
+                f"tasks={len(tasks)}",
+                f"models={model_labels}",
+                f"mock={use_mock}",
+                flush=True,
+            )
+
         for spec in model_specs:
             model_label = spec.label
             if not is_provider_enabled(spec.provider, enabled_providers):
@@ -100,6 +112,13 @@ def main():
                         ),
                     )
                 conn.commit()
+                if args.verbose:
+                    print(
+                        "[llm] skip",
+                        f"model={model_label}",
+                        f"reason=disabled({spec.provider})",
+                        flush=True,
+                    )
                 continue
 
             try:
@@ -121,6 +140,13 @@ def main():
                         ),
                     )
                 conn.commit()
+                if args.verbose:
+                    print(
+                        "[llm] fail",
+                        f"model={model_label}",
+                        f"error={exc}",
+                        flush=True,
+                    )
                 continue
             with conn.cursor() as cur:
                 cur.execute(
@@ -137,6 +163,10 @@ def main():
             prompt_hash = hash_text(
                 f"{PROMPT_TEMPLATE}|{args.prompt_version}|{args.model_version}"
             )
+            cache_hits = 0
+            scored = 0
+            if args.verbose:
+                print("[llm] run", f"model={model_label}", f"run_id={run_id}", flush=True)
             try:
                 for task_id, task_statement in tasks:
                     input_hash = hash_text(task_statement or "")
@@ -152,6 +182,14 @@ def main():
                             (data_version, task_id, model_label, prompt_hash, input_hash),
                         )
                         if cur.fetchone():
+                            cache_hits += 1
+                            if args.verbose:
+                                print(
+                                    "[llm] cache",
+                                    f"model={model_label}",
+                                    f"task_id={task_id}",
+                                    flush=True,
+                                )
                             continue
 
                     def _score_call():
@@ -169,6 +207,15 @@ def main():
                         max_delay=args.retry_max_delay,
                         jitter=args.retry_jitter,
                     )
+                    scored += 1
+                    if args.verbose:
+                        print(
+                            "[llm] score",
+                            f"model={model_label}",
+                            f"task_id={task_id}",
+                            f"score={score}",
+                            flush=True,
+                        )
                     payload = {
                         "provider": spec.provider,
                         "model": spec.model,
@@ -218,6 +265,13 @@ def main():
                         ("failed", str(exc), run_id),
                     )
                 conn.commit()
+                if args.verbose:
+                    print(
+                        "[llm] error",
+                        f"model={model_label}",
+                        f"error={exc}",
+                        flush=True,
+                    )
                 continue
             except Exception as exc:
                 with conn.cursor() as cur:
@@ -232,6 +286,13 @@ def main():
                         ("failed", str(exc), run_id),
                     )
                 conn.commit()
+                if args.verbose:
+                    print(
+                        "[llm] error",
+                        f"model={model_label}",
+                        f"error={exc}",
+                        flush=True,
+                    )
                 continue
             else:
                 with conn.cursor() as cur:
@@ -244,6 +305,14 @@ def main():
                         ("completed", run_id),
                     )
                 conn.commit()
+                if args.verbose:
+                    print(
+                        "[llm] done",
+                        f"model={model_label}",
+                        f"scored={scored}",
+                        f"cache_hits={cache_hits}",
+                        flush=True,
+                    )
 
         task_ids = [task_id for task_id, _ in tasks]
         if task_ids:
