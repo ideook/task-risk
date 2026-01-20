@@ -1,0 +1,10 @@
+# /etc/cron.d/task-risk
+SHELL=/bin/bash
+# Run catalog rebuild weekly (Monday 02:00)
+0 2 * * 1 ubuntu cd /opt/task-risk && ./.venv/bin/python -m batch.build_task_catalog --size 200 >> /var/log/task-risk/cron.log 2>&1
+# Run weight rebuild weekly (Monday 02:10)
+10 2 * * 1 ubuntu cd /opt/task-risk && ./.venv/bin/python -m batch.build_task_weights >> /var/log/task-risk/cron.log 2>&1
+# Run scoring sample weekly (Monday 02:20)
+20 2 * * 1 ubuntu cd /opt/task-risk && ./.venv/bin/python -m worker.score_tasks --limit 20 >> /var/log/task-risk/cron.log 2>&1
+# Aggregate occupations weekly (Monday 02:40)
+40 2 * * 1 ubuntu cd /opt/task-risk && ./.venv/bin/python -m worker.aggregate_occupations >> /var/log/task-risk/cron.log 2>&1

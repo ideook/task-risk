@@ -1,0 +1,15 @@
+[Unit]
+Description=task-risk API
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/task-risk
+EnvironmentFile=/opt/task-risk/.env
+ExecStart=/opt/task-risk/.venv/bin/uvicorn api.main:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
