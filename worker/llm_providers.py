@@ -1,8 +1,9 @@
 import hashlib
+import json
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Iterable, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 
 class ProviderError(RuntimeError):
@@ -16,7 +17,8 @@ class ScoreProvider:
         prompt_template: str,
         prompt_version: str,
         model_version: str,
-    ) -> float:
+        schema: Optional["StructuredOutputSchema"] = None,
+    ) -> Dict[str, float]:
         raise NotImplementedError
 
 
@@ -30,6 +32,12 @@ class ProviderSpec:
         return f"{self.provider}:{self.model}"
 
 
+@dataclass(frozen=True)
+class StructuredOutputSchema:
+    name: str
+    schema: Dict[str, Any]
+
+
 @dataclass
 class MockProvider(ScoreProvider):
     model: str
@@ -40,10 +48,10 @@ class MockProvider(ScoreProvider):
         prompt_template: str,
         prompt_version: str,
         model_version: str,
-    ) -> float:
+        schema: Optional[StructuredOutputSchema] = None,
+    ) -> Dict[str, float]:
         seed = f"{self.model}|{model_version}|{prompt_version}|{prompt_template}|{task_statement}"
-        digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
-        return float(int(digest[:8], 16) % 101)
+        return _mock_scores(seed, schema)
 
 
 @dataclass
@@ -71,13 +79,17 @@ class OpenAIProvider(ScoreProvider):
         prompt_template: str,
         prompt_version: str,
         model_version: str,
-    ) -> float:
+        schema: Optional[StructuredOutputSchema] = None,
+    ) -> Dict[str, float]:
         prompt = _format_prompt(prompt_template, task_statement)
         payload = {
             "model": self.model,
             "input": prompt,
-            "max_output_tokens": _int_env("LLM_MAX_OUTPUT_TOKENS", 16),
+            "max_output_tokens": _max_output_tokens(schema),
         }
+        text_payload: Dict[str, Any] = {}
+        if schema:
+            text_payload["format"] = _openai_text_format(schema)
         temperature = _float_env_optional("LLM_TEMPERATURE")
         if temperature is not None:
             payload["temperature"] = temperature
@@ -86,10 +98,15 @@ class OpenAIProvider(ScoreProvider):
             payload["reasoning"] = {"effort": reasoning_effort}
         verbosity = _openai_text_verbosity(self.model)
         if verbosity:
-            payload["text"] = {"verbosity": verbosity}
+            text_payload["verbosity"] = verbosity
+        if text_payload:
+            payload["text"] = text_payload
         response = self.client.responses.create(**payload)
         text = _extract_openai_text(response)
-        return _parse_score(text)
+        if schema:
+            data = _parse_json_text(text)
+            return _normalize_scores(data, schema)
+        return {"ai_substitution_risk": _parse_score(text)}
 
 
 @dataclass
@@ -115,16 +132,58 @@ class AnthropicProvider(ScoreProvider):
         prompt_template: str,
         prompt_version: str,
         model_version: str,
-    ) -> float:
+        schema: Optional[StructuredOutputSchema] = None,
+    ) -> Dict[str, float]:
         prompt = _format_prompt(prompt_template, task_statement)
-        message = self.client.messages.create(
-            model=self.model,
-            max_tokens=_int_env("LLM_MAX_OUTPUT_TOKENS", 16),
-            temperature=_float_env("LLM_TEMPERATURE", 0.0),
-            messages=[{"role": "user", "content": prompt}],
-        )
+
+        def _call(extra_note: Optional[str] = None):
+            content = prompt
+            if extra_note:
+                content = f"{prompt}\n\nIMPORTANT: {extra_note}"
+            payload = {
+                "model": self.model,
+                "max_tokens": _max_output_tokens(schema),
+                "temperature": _float_env("LLM_TEMPERATURE", 0.0),
+                "messages": [{"role": "user", "content": content}],
+            }
+            if schema:
+                payload["system"] = (
+                    "You must call the tool and include every required field. "
+                    "If a field is unknown, set it to 0 and set confidence to 0."
+                )
+                payload["tools"] = [
+                    {
+                        "name": schema.name,
+                        "description": "Return task risk scores as structured JSON.",
+                        "input_schema": schema.schema,
+                    }
+                ]
+                payload["tool_choice"] = {"type": "tool", "name": schema.name}
+            return self.client.messages.create(**payload)
+
+        message = _call()
+        if schema:
+            tool_input = _extract_anthropic_tool_input(message, schema.name)
+            if tool_input is None:
+                text = _extract_anthropic_text(message)
+                data = _parse_json_text(text)
+            else:
+                data = tool_input
+            missing = _missing_required_fields(data, schema)
+            if missing:
+                message = _call(
+                    "Return ALL required fields. Missing fields: " + ", ".join(missing)
+                )
+                tool_input = _extract_anthropic_tool_input(message, schema.name)
+                if tool_input is None:
+                    text = _extract_anthropic_text(message)
+                    data = _parse_json_text(text)
+                else:
+                    data = tool_input
+            data = _fill_missing_scores(data, schema)
+            return _normalize_scores(data, schema)
         text = _extract_anthropic_text(message)
-        return _parse_score(text)
+        return {"ai_substitution_risk": _parse_score(text)}
 
 
 @dataclass
@@ -152,13 +211,17 @@ class LocalOpenAIProvider(ScoreProvider):
         prompt_template: str,
         prompt_version: str,
         model_version: str,
-    ) -> float:
+        schema: Optional[StructuredOutputSchema] = None,
+    ) -> Dict[str, float]:
         prompt = _format_prompt(prompt_template, task_statement)
         payload = {
             "model": self.model,
             "input": prompt,
-            "max_output_tokens": _int_env("LLM_MAX_OUTPUT_TOKENS", 16),
+            "max_output_tokens": _max_output_tokens(schema),
         }
+        text_payload: Dict[str, Any] = {}
+        if schema:
+            text_payload["format"] = _openai_text_format(schema)
         temperature = _float_env_optional("LLM_TEMPERATURE")
         if temperature is not None:
             payload["temperature"] = temperature
@@ -167,10 +230,15 @@ class LocalOpenAIProvider(ScoreProvider):
             payload["reasoning"] = {"effort": reasoning_effort}
         verbosity = _openai_text_verbosity(self.model)
         if verbosity:
-            payload["text"] = {"verbosity": verbosity}
+            text_payload["verbosity"] = verbosity
+        if text_payload:
+            payload["text"] = text_payload
         response = self.client.responses.create(**payload)
         text = _extract_openai_text(response)
-        return _parse_score(text)
+        if schema:
+            data = _parse_json_text(text)
+            return _normalize_scores(data, schema)
+        return {"ai_substitution_risk": _parse_score(text)}
 
 
 _PROVIDER_ALIASES = {
@@ -274,6 +342,97 @@ def _parse_score(text: Optional[str]) -> float:
     return score
 
 
+def _openai_text_format(schema: StructuredOutputSchema) -> Dict[str, Any]:
+    return {
+        "type": "json_schema",
+        "name": schema.name,
+        "schema": schema.schema,
+        "strict": True,
+    }
+
+
+def _parse_json_text(text: Optional[str]) -> Dict[str, Any]:
+    if not text:
+        raise ProviderError("Empty response")
+    value = text.strip()
+    try:
+        parsed = json.loads(value)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+    start = value.find("{")
+    end = value.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        try:
+            parsed = json.loads(value[start : end + 1])
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+    raise ProviderError(f"Could not parse JSON from: {value[:200]}")
+
+
+def _normalize_scores(data: Dict[str, Any], schema: StructuredOutputSchema) -> Dict[str, float]:
+    properties = schema.schema.get("properties", {})
+    required = schema.schema.get("required") or list(properties.keys())
+    scores: Dict[str, float] = {}
+    for key in required:
+        if key not in data:
+            raise ProviderError(f"Missing field: {key}")
+        value = data.get(key)
+        try:
+            number = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ProviderError(f"Invalid value for {key}: {value}") from exc
+        rules = properties.get(key, {})
+        minimum = rules.get("minimum")
+        maximum = rules.get("maximum")
+        if minimum is not None:
+            number = max(number, float(minimum))
+        if maximum is not None:
+            number = min(number, float(maximum))
+        scores[key] = round(number, 2)
+    return scores
+
+
+def _missing_required_fields(data: Dict[str, Any], schema: StructuredOutputSchema) -> List[str]:
+    properties = schema.schema.get("properties", {})
+    required = schema.schema.get("required") or list(properties.keys())
+    return [key for key in required if key not in data]
+
+
+def _fill_missing_scores(data: Dict[str, Any], schema: StructuredOutputSchema) -> Dict[str, Any]:
+    properties = schema.schema.get("properties", {})
+    required = schema.schema.get("required") or list(properties.keys())
+    filled = dict(data or {})
+    for key in required:
+        value = filled.get(key)
+        if value is None:
+            filled[key] = 0
+    if "confidence" in required:
+        filled["confidence"] = 0 if _missing_required_fields(data, schema) else filled.get("confidence", 0)
+    return filled
+
+
+def _mock_scores(seed: str, schema: Optional[StructuredOutputSchema]) -> Dict[str, float]:
+    if not schema:
+        digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
+        return {"ai_substitution_risk": float(int(digest[:8], 16) % 101)}
+    properties = schema.schema.get("properties", {})
+    required = schema.schema.get("required") or list(properties.keys())
+    scores: Dict[str, float] = {}
+    for key in required:
+        digest = hashlib.sha256(f"{seed}|{key}".encode("utf-8")).hexdigest()
+        raw = int(digest[:8], 16) / 0xFFFFFFFF
+        rules = properties.get(key, {})
+        minimum = float(rules.get("minimum", 0.0))
+        maximum = float(rules.get("maximum", 100.0))
+        value = minimum + (maximum - minimum) * raw
+        scores[key] = round(value, 2)
+    return scores
+
+
 def _int_env(name: str, default: int) -> int:
     value = os.getenv(name, "")
     if not value:
@@ -282,6 +441,13 @@ def _int_env(name: str, default: int) -> int:
         return int(value)
     except ValueError:
         return default
+
+
+def _max_output_tokens(schema: Optional[StructuredOutputSchema]) -> int:
+    base = _int_env("LLM_MAX_OUTPUT_TOKENS", 16)
+    if schema:
+        return max(base, 128)
+    return base
 
 
 def _float_env(name: str, default: float) -> float:
@@ -354,3 +520,19 @@ def _extract_anthropic_text(message) -> str:
         if text:
             chunks.append(str(text))
     return "\n".join(chunks)
+
+
+def _extract_anthropic_tool_input(message, tool_name: str) -> Optional[Dict[str, Any]]:
+    content = _get_attr(message, "content") or []
+    for part in content:
+        if _get_attr(part, "type") != "tool_use":
+            continue
+        if _get_attr(part, "name") != tool_name:
+            continue
+        tool_input = _get_attr(part, "input")
+        if isinstance(tool_input, dict):
+            return tool_input
+        if tool_input is None:
+            continue
+        return dict(tool_input)
+    return None

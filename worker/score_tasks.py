@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from api.db import get_conn
 from worker.llm_providers import (
     ProviderError,
+    StructuredOutputSchema,
     env_flag,
     get_enabled_providers,
     get_provider,
@@ -17,9 +18,38 @@ from worker.llm_providers import (
 from worker.retry import retry_call
 
 PROMPT_TEMPLATE = (
-    "Score the automation risk for the task below from 0 (no risk) "
-    "to 100 (highly automatable). Return only the numeric score.\n\n"
-    "Task:\n{task_statement}"
+    "You are scoring AI impact for a single task. "
+    "Return a JSON object that matches the provided schema exactly.\n"
+    "Scoring rules:\n"
+    "- ai_substitution_risk: 0-100, higher = easier to replace by AI.\n"
+    "- ai_augmentation_potential: 0-100, higher = AI can strongly assist.\n"
+    "- human_context_dependency: 0-100, higher = depends on human judgment/interaction.\n"
+    "- physical_world_dependency: 0-100, higher = requires physical presence.\n"
+    "- confidence: 0-1, higher = more confident.\n"
+    "Use the AI Tech Progress context when present; if it says \"None\", treat as unknown.\n\n"
+    "Task and context:\n{task_statement}"
+)
+
+SCORE_SCHEMA = StructuredOutputSchema(
+    name="task_risk_scores",
+    schema={
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "ai_substitution_risk",
+            "ai_augmentation_potential",
+            "human_context_dependency",
+            "physical_world_dependency",
+            "confidence",
+        ],
+        "properties": {
+            "ai_substitution_risk": {"type": "number", "minimum": 0, "maximum": 100},
+            "ai_augmentation_potential": {"type": "number", "minimum": 0, "maximum": 100},
+            "human_context_dependency": {"type": "number", "minimum": 0, "maximum": 100},
+            "physical_world_dependency": {"type": "number", "minimum": 0, "maximum": 100},
+            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        },
+    },
 )
 
 
@@ -198,11 +228,15 @@ def format_progress_context(
 
 def build_task_input(task_statement: str, week: str, context: str) -> str:
     statement = (task_statement or "").strip()
-    lines = [statement]
+    if not statement:
+        statement = "Unknown task."
+    context_value = (context or "").strip() or "None"
+    lines = ["Task:", statement, ""]
     if week:
-        lines.append("")
         lines.append(f"AI Tech Progress (week {week}):")
-        lines.append(context)
+    else:
+        lines.append("AI Tech Progress:")
+    lines.append(context_value)
     return "\n".join(lines).strip()
 
 
@@ -438,9 +472,10 @@ def main():
                             PROMPT_TEMPLATE,
                             args.prompt_version,
                             args.model_version,
+                            schema=SCORE_SCHEMA,
                         )
 
-                    score = retry_call(
+                    scores = retry_call(
                         _score_call,
                         retries=args.max_retries,
                         base_delay=args.retry_base_delay,
@@ -448,12 +483,13 @@ def main():
                         jitter=args.retry_jitter,
                     )
                     scored += 1
+                    substitution = scores.get("ai_substitution_risk")
                     if args.verbose:
                         print(
                             "[llm] score",
                             f"model={model_label}",
                             f"task_id={task_id}",
-                            f"score={score}",
+                            f"score={substitution}",
                             flush=True,
                         )
                     payload = {
@@ -468,7 +504,8 @@ def main():
                         "task_statement": task_statement,
                         "task_input": task_input,
                         "tech_progress_context": context,
-                        "score": score,
+                        "score": substitution,
+                        "scores": scores,
                     }
                     safe_model = model_label.replace(":", "_").replace("/", "_")
                     safe_week = week.replace("/", "_")
@@ -482,8 +519,10 @@ def main():
                         cur.execute(
                             """
                             INSERT INTO task_ai_score
-                                (data_version, week, task_id, model, score, run_id, raw_json_ref, prompt_hash, input_hash)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                (data_version, week, task_id, model, score, ai_substitution_risk,
+                                 ai_augmentation_potential, human_context_dependency, physical_world_dependency,
+                                 confidence, run_id, raw_json_ref, prompt_hash, input_hash)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                             ON CONFLICT (data_version, week, task_id, model, prompt_hash, input_hash) DO NOTHING
                             """,
                             (
@@ -491,7 +530,12 @@ def main():
                                 week,
                                 task_id,
                                 model_label,
-                                score,
+                                substitution,
+                                scores.get("ai_substitution_risk"),
+                                scores.get("ai_augmentation_potential"),
+                                scores.get("human_context_dependency"),
+                                scores.get("physical_world_dependency"),
+                                scores.get("confidence"),
                                 run_id,
                                 str(raw_path),
                                 prompt_hash,
@@ -567,7 +611,18 @@ def main():
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO task_ai_ensemble (data_version, week, task_id, mean, std, min, max, updated_at)
+                    INSERT INTO task_ai_ensemble (
+                        data_version, week, task_id,
+                        mean, std, min, max,
+                        ai_augmentation_potential_mean, ai_augmentation_potential_std,
+                        ai_augmentation_potential_min, ai_augmentation_potential_max,
+                        human_context_dependency_mean, human_context_dependency_std,
+                        human_context_dependency_min, human_context_dependency_max,
+                        physical_world_dependency_mean, physical_world_dependency_std,
+                        physical_world_dependency_min, physical_world_dependency_max,
+                        confidence_mean, confidence_std, confidence_min, confidence_max,
+                        updated_at
+                    )
                     SELECT
                         data_version,
                         week,
@@ -576,6 +631,22 @@ def main():
                         STDDEV_POP(score)::numeric(6,2) AS std,
                         MIN(score)::numeric(6,2) AS min,
                         MAX(score)::numeric(6,2) AS max,
+                        AVG(ai_augmentation_potential)::numeric(6,2) AS ai_augmentation_potential_mean,
+                        STDDEV_POP(ai_augmentation_potential)::numeric(6,2) AS ai_augmentation_potential_std,
+                        MIN(ai_augmentation_potential)::numeric(6,2) AS ai_augmentation_potential_min,
+                        MAX(ai_augmentation_potential)::numeric(6,2) AS ai_augmentation_potential_max,
+                        AVG(human_context_dependency)::numeric(6,2) AS human_context_dependency_mean,
+                        STDDEV_POP(human_context_dependency)::numeric(6,2) AS human_context_dependency_std,
+                        MIN(human_context_dependency)::numeric(6,2) AS human_context_dependency_min,
+                        MAX(human_context_dependency)::numeric(6,2) AS human_context_dependency_max,
+                        AVG(physical_world_dependency)::numeric(6,2) AS physical_world_dependency_mean,
+                        STDDEV_POP(physical_world_dependency)::numeric(6,2) AS physical_world_dependency_std,
+                        MIN(physical_world_dependency)::numeric(6,2) AS physical_world_dependency_min,
+                        MAX(physical_world_dependency)::numeric(6,2) AS physical_world_dependency_max,
+                        AVG(confidence)::numeric(6,2) AS confidence_mean,
+                        STDDEV_POP(confidence)::numeric(6,2) AS confidence_std,
+                        MIN(confidence)::numeric(6,2) AS confidence_min,
+                        MAX(confidence)::numeric(6,2) AS confidence_max,
                         NOW()
                     FROM task_ai_score
                     WHERE data_version = %s
@@ -587,6 +658,22 @@ def main():
                         std = EXCLUDED.std,
                         min = EXCLUDED.min,
                         max = EXCLUDED.max,
+                        ai_augmentation_potential_mean = EXCLUDED.ai_augmentation_potential_mean,
+                        ai_augmentation_potential_std = EXCLUDED.ai_augmentation_potential_std,
+                        ai_augmentation_potential_min = EXCLUDED.ai_augmentation_potential_min,
+                        ai_augmentation_potential_max = EXCLUDED.ai_augmentation_potential_max,
+                        human_context_dependency_mean = EXCLUDED.human_context_dependency_mean,
+                        human_context_dependency_std = EXCLUDED.human_context_dependency_std,
+                        human_context_dependency_min = EXCLUDED.human_context_dependency_min,
+                        human_context_dependency_max = EXCLUDED.human_context_dependency_max,
+                        physical_world_dependency_mean = EXCLUDED.physical_world_dependency_mean,
+                        physical_world_dependency_std = EXCLUDED.physical_world_dependency_std,
+                        physical_world_dependency_min = EXCLUDED.physical_world_dependency_min,
+                        physical_world_dependency_max = EXCLUDED.physical_world_dependency_max,
+                        confidence_mean = EXCLUDED.confidence_mean,
+                        confidence_std = EXCLUDED.confidence_std,
+                        confidence_min = EXCLUDED.confidence_min,
+                        confidence_max = EXCLUDED.confidence_max,
                         updated_at = EXCLUDED.updated_at
                     """,
                     (data_version, week, task_ids),

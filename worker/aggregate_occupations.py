@@ -80,13 +80,29 @@ def main():
                 )
             cur.execute(
                 """
-                INSERT INTO occupation_ai_score (data_version, week, soc_code, mean, std, updated_at)
+                INSERT INTO occupation_ai_score (
+                    data_version, week, soc_code,
+                    mean, std,
+                    ai_augmentation_potential_mean, ai_augmentation_potential_std,
+                    human_context_dependency_mean, human_context_dependency_std,
+                    physical_world_dependency_mean, physical_world_dependency_std,
+                    confidence_mean, confidence_std,
+                    updated_at
+                )
                 SELECT
                     otw.data_version,
                     %(week)s AS week,
                     otw.soc_code,
                     SUM(otw.weight * tae.mean) AS mean,
                     SQRT(SUM(POWER(otw.weight * COALESCE(tae.std, 0), 2))) AS std,
+                    SUM(otw.weight * tae.ai_augmentation_potential_mean) AS ai_augmentation_potential_mean,
+                    SQRT(SUM(POWER(otw.weight * COALESCE(tae.ai_augmentation_potential_std, 0), 2))) AS ai_augmentation_potential_std,
+                    SUM(otw.weight * tae.human_context_dependency_mean) AS human_context_dependency_mean,
+                    SQRT(SUM(POWER(otw.weight * COALESCE(tae.human_context_dependency_std, 0), 2))) AS human_context_dependency_std,
+                    SUM(otw.weight * tae.physical_world_dependency_mean) AS physical_world_dependency_mean,
+                    SQRT(SUM(POWER(otw.weight * COALESCE(tae.physical_world_dependency_std, 0), 2))) AS physical_world_dependency_std,
+                    SUM(otw.weight * tae.confidence_mean) AS confidence_mean,
+                    SQRT(SUM(POWER(otw.weight * COALESCE(tae.confidence_std, 0), 2))) AS confidence_std,
                     NOW()
                 FROM occupation_task_weight otw
                 JOIN task_ai_ensemble tae
@@ -98,6 +114,14 @@ def main():
                 ON CONFLICT (data_version, week, soc_code) DO UPDATE
                 SET mean = EXCLUDED.mean,
                     std = EXCLUDED.std,
+                    ai_augmentation_potential_mean = EXCLUDED.ai_augmentation_potential_mean,
+                    ai_augmentation_potential_std = EXCLUDED.ai_augmentation_potential_std,
+                    human_context_dependency_mean = EXCLUDED.human_context_dependency_mean,
+                    human_context_dependency_std = EXCLUDED.human_context_dependency_std,
+                    physical_world_dependency_mean = EXCLUDED.physical_world_dependency_mean,
+                    physical_world_dependency_std = EXCLUDED.physical_world_dependency_std,
+                    confidence_mean = EXCLUDED.confidence_mean,
+                    confidence_std = EXCLUDED.confidence_std,
                     updated_at = EXCLUDED.updated_at
                 """,
                 {"data_version": args.data_version, "week": week},
