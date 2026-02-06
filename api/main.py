@@ -13,7 +13,8 @@ cors_origins = [
     origin.strip()
     for origin in os.getenv(
         "CORS_ALLOW_ORIGINS",
-        "http://localhost:3000,http://127.0.0.1:3000,http://192.168.3.91:3000",
+        "http://localhost:3000,http://127.0.0.1:3000,http://192.168.3.91:3000,"
+        "http://localhost:3001,http://127.0.0.1:3001,http://192.168.3.91:3001",
     ).split(",")
     if origin.strip()
 ]
